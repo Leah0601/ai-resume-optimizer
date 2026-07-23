@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && mkdir -p dist/server dist/.openai && cp .openai/hosting.json dist/.openai/hosting.json && node -e \"const f=require('fs'),h=f.readFileSync('dist/index.html','utf8');f.writeFileSync('dist/server/index.js','const html='+JSON.stringify(h)+';export default {async fetch(){return new Response(html,{headers:{\\\"content-type\\\":\\\"text/html;charset=UTF-8\\\"}})}};')\"",
     "preview": "vite preview"
   },
   "devDependencies": {
