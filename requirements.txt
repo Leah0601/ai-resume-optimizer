@@ -2,3 +2,4 @@ streamlit
 pypdf
 openai
 pdfminer.six
+python-docx

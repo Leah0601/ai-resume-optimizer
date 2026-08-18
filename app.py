@@ -13,14 +13,19 @@ try:
 except Exception:
     openai = None
 
-docx = None
+try:
+    import docx
+    from docx import Document
+except Exception:
+    docx = None
+    Document = None
 
 st.set_page_config(page_title="AI Resume Optimizer", layout="centered")
 
 st.title("🤖 AI Resume Optimizer")
 st.write("Optimize your resume with AI — Product Demo for AI PM roles")
 
-resume = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
+resume = st.file_uploader("Upload Resume (DOCX)", type=["docx"])
 
 position = st.text_input(
     "Target Position",
@@ -57,44 +62,43 @@ def get_cached_resume_text(uploaded_file):
 def extract_pdf_text(uploaded_file):
     if not uploaded_file:
         return ""
-    if PdfReader is None:
-        try:
-            return uploaded_file.getvalue().decode(errors="ignore")
-        except Exception:
-            return ""
+    # Prefer DOCX extraction when a .docx file is uploaded
     try:
-        uploaded_file.seek(0)
-        reader = PdfReader(uploaded_file)
-        texts = []
-        for p in reader.pages:
-            texts.append(p.extract_text() or "")
-        return "\n".join(texts)
+        if Document is not None and uploaded_file.name.lower().endswith('.docx'):
+            import io
+            uploaded_file.seek(0)
+            doc = Document(io.BytesIO(uploaded_file.getvalue()))
+            paragraphs = [p.text for p in doc.paragraphs if p.text]
+            # also extract text from tables
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text:
+                            paragraphs.append(cell.text)
+            return "\n".join(paragraphs)
     except Exception:
+        # fallthrough to other extraction methods
+        pass
+
+    # Fallbacks: try pypdf for PDF-like content
+    if PdfReader is not None:
         try:
-            return uploaded_file.getvalue().decode(errors="ignore")
-        except Exception:
-            return ""
-    # If pypdf yielded empty text, try pdfminer as a fallback
-    try:
-        uploaded_file.seek(0)
-        raw = uploaded_file.getvalue()
-        try:
-            from pdfminer.high_level import extract_text as pm_extract_text
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
-                tmp.write(raw)
-                tmp.flush()
-                text = pm_extract_text(tmp.name)
-            try:
-                os.unlink(tmp.name)
-            except Exception:
-                pass
-            if text and text.strip():
-                return text
+            uploaded_file.seek(0)
+            reader = PdfReader(uploaded_file)
+            texts = []
+            for p in reader.pages:
+                texts.append(p.extract_text() or "")
+            combined = "\n".join(texts)
+            if combined.strip():
+                return combined
         except Exception:
             pass
+
+    # Last resort: return decoded bytes
+    try:
+        return uploaded_file.getvalue().decode(errors="ignore")
     except Exception:
-        pass
+        return ""
 
 
 STOPWORDS = set([
@@ -319,6 +323,72 @@ def generate_improvements(resume_text, jd_text, use_openai=False, api_key=None):
     }
 
 
+def build_optimized_docx_bytes(uploaded_file, originals, improveds):
+    """Load uploaded docx, replace experience bullets that match originals with improveds, return bytes."""
+    if Document is None:
+        return None
+    import io
+
+    uploaded_file.seek(0)
+    try:
+        doc = Document(io.BytesIO(uploaded_file.getvalue()))
+    except Exception:
+        return None
+
+    # create mapping from normalized original -> improved
+    def normalize(s):
+        return re.sub(r"\W+", "", s.lower()).strip()
+
+    mapping = {normalize(o): n for o, n in zip(originals, improveds)}
+
+    # find experience section boundaries by heading detection
+    headings = ["experience", "work experience", "professional experience", "education", "skills", "projects", "summary", "certifications"]
+    in_experience = False
+
+    for p in doc.paragraphs:
+        text = p.text.strip()
+        low = text.lower()
+        # heading check
+        is_heading = any(low.startswith(h) for h in headings)
+        if is_heading:
+            # toggle in_experience if this is an experience heading
+            if any(low.startswith(h) for h in ["experience", "work experience", "professional experience"]):
+                in_experience = True
+            else:
+                # entering a non-experience section -> turn off
+                in_experience = False
+            continue
+
+        if not in_experience:
+            continue
+
+        # normalize paragraph and see if it matches any original bullet
+        # remove leading bullet chars for matching
+        m = re.match(r'^([\-\*\u2022]\s*)(.*)$', text)
+        if m:
+            prefix = m.group(1)
+            core = m.group(2)
+        else:
+            prefix = ''
+            core = text
+
+        key = normalize(core)
+        if key in mapping:
+            # replace paragraph text but keep style
+            try:
+                p.text = prefix + mapping[key]
+            except Exception:
+                p.text = mapping[key]
+
+    out = io.BytesIO()
+    try:
+        doc.save(out)
+        out.seek(0)
+        return out.read()
+    except Exception:
+        return None
+
+
 st.markdown('**Workflow:** Upload Resume → Paste JD → Analyze → Generate')
 
 
@@ -392,6 +462,13 @@ if st.button('Generate Optimized Resume'):
 
         st.subheader('Resume Match Score')
         st.metric('Match Score', f"{result['score']}%")
+
+        # Build optimized DOCX and provide download
+        docx_bytes = build_optimized_docx_bytes(resume, result['original_bullets'], result['improved_bullets'])
+        if docx_bytes is None:
+            st.error('Could not generate DOCX. Ensure python-docx is installed and the uploaded file is a valid DOCX.')
+        else:
+            st.download_button('Download Optimized Resume.docx', data=docx_bytes, file_name='Optimized_Resume.docx', mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
 
         st.success('AI suggestions generated.')
 
